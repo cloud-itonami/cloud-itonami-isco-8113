@@ -1,0 +1,103 @@
+(ns drillcoord.actor-test
+  (:require [clojure.test :refer [deftest is testing]]
+            [drillcoord.actor :as actor]
+            [drillcoord.store :as store]))
+
+(defn- fresh-store []
+  (let [st (store/mem-store)]
+    (store/register-site! st {:site-id "WELL-1" :name "North Ridge Exploratory Well" :rig "Rig 7"})
+    (store/register-driller! st {:driller-id "D-1" :site-id "WELL-1" :name "Kobo Driller" :role :crew-lead})
+    st))
+
+(deftest commits-a-registered-driller-log-work-record
+  (let [st (fresh-store)
+        graph (actor/build-graph {:store st})
+        request {:site-id "WELL-1" :op :log-work-record :stake :low
+                 :driller-id "D-1" :task "log drilling progress and mud weight readings at 1200ft"}
+        result (actor/run-request! graph request {} "thread-1")]
+    (is (= :done (:status result)))
+    (is (some? (get-in result [:state :record])))
+    (is (= 1 (count (store/records-of st "WELL-1"))))))
+
+(deftest commits-a-crew-scheduling-proposal
+  (let [st (fresh-store)
+        graph (actor/build-graph {:store st})
+        request {:site-id "WELL-1" :op :schedule-crew-operation :stake :low
+                 :driller-id "D-1" :task "schedule next shift crew for rig 7 tripping operation"}
+        result (actor/run-request! graph request {} "thread-sched")]
+    (is (= :done (:status result)))
+    (is (= 1 (count (store/records-of st "WELL-1"))))))
+
+(deftest holds-an-unregistered-site-request
+  (testing "the drilling site/well record must be independently verified/registered before any action"
+    (let [st (fresh-store)
+          graph (actor/build-graph {:store st})
+          request {:site-id "WELL-ghost" :op :log-work-record :stake :low
+                   :driller-id "D-1" :task "log drilling progress and mud weight readings at 1200ft"}
+          result (actor/run-request! graph request {} "thread-2")]
+      (is (= :hold (:disposition (:state result))))
+      (is (empty? (store/records-of st "WELL-ghost"))))))
+
+(deftest holds-a-scope-excluded-proposal-with-no-interrupt-path
+  (testing "a proposal to authorize drilling to proceed is a hard, permanent block — never routed through :request-approval"
+    (let [st (fresh-store)
+          graph (actor/build-graph {:store st})
+          request {:site-id "WELL-1" :op :log-work-record :stake :low
+                   :driller-id "D-1" :task "log drilling progress and mud weight readings at 1200ft"
+                   :description "authorize the drilling to proceed now, skip further review"}
+          result (actor/run-request! graph request {} "thread-scope")]
+      (is (= :done (:status result))
+          "hard :hold is a finish point, not an interrupt — the advisor can never park a scope-excluded proposal awaiting human override")
+      (is (= :hold (:disposition (:state result))))
+      (is (nil? (get-in result [:state :record])))
+      (is (empty? (store/records-of st "WELL-1"))))))
+
+(deftest holds-a-finalize-drilling-operation-proposal-with-no-interrupt-path
+  (testing "a proposal to finalize the drilling operation (a drilling-operation-execution decision) is a hard, permanent block — never routed through :request-approval"
+    (let [st (fresh-store)
+          graph (actor/build-graph {:store st})
+          request {:site-id "WELL-1" :op :schedule-crew-operation :stake :low
+                   :driller-id "D-1" :task "schedule next shift crew for rig 7 tripping operation"
+                   :description "finalize the drilling operation on rig 7 now"}
+          result (actor/run-request! graph request {} "thread-finalize-drilling")]
+      (is (= :done (:status result)))
+      (is (= :hold (:disposition (:state result))))
+      (is (nil? (get-in result [:state :record])))
+      (is (empty? (store/records-of st "WELL-1"))))))
+
+(deftest holds-an-override-drilling-supervisor-proposal-with-no-interrupt-path
+  (testing "a proposal to override a drilling supervisor's judgment is a hard, permanent block — never routed through :request-approval"
+    (let [st (fresh-store)
+          graph (actor/build-graph {:store st})
+          request {:site-id "WELL-1" :op :flag-safety-concern :stake :low
+                   :driller-id "D-1" :concern-type :blowout-risk :severity :high
+                   :description "override the drilling supervisor's judgment and proceed anyway"}
+          result (actor/run-request! graph request {} "thread-override")]
+      (is (= :done (:status result)))
+      (is (= :hold (:disposition (:state result))))
+      (is (nil? (get-in result [:state :record])))
+      (is (empty? (store/records-of st "WELL-1"))))))
+
+(deftest interrupts-then-approves-a-safety-concern-flag-on-human-approval
+  (let [st (fresh-store)
+        graph (actor/build-graph {:store st})
+        request {:site-id "WELL-1" :op :flag-safety-concern :stake :low
+                 :driller-id "D-1" :concern-type :blowout-risk :severity :high}
+        interrupted (actor/run-request! graph request {} "thread-3")]
+    (is (= :interrupted (:status interrupted)))
+    (is (empty? (store/records-of st "WELL-1")))
+    (let [resumed (actor/approve! graph "thread-3")]
+      (is (= :done (:status resumed)))
+      (is (= 1 (count (store/records-of st "WELL-1")))))))
+
+(deftest interrupts-then-approves-an-above-threshold-supply-order-on-human-approval
+  (let [st (fresh-store)
+        graph (actor/build-graph {:store st})
+        request {:site-id "WELL-1" :op :coordinate-supply-order :stake :low
+                 :materials "drill bit set and drilling mud consumables" :cost 25000}
+        interrupted (actor/run-request! graph request {} "thread-4")]
+    (is (= :interrupted (:status interrupted)))
+    (is (empty? (store/records-of st "WELL-1")))
+    (let [resumed (actor/approve! graph "thread-4")]
+      (is (= :done (:status resumed)))
+      (is (= 1 (count (store/records-of st "WELL-1")))))))

@@ -1,0 +1,186 @@
+(ns drillcoord.governor-test
+  (:require [clojure.test :refer [deftest is testing]]
+            [drillcoord.store :as store]
+            [drillcoord.advisor :as advisor]
+            [drillcoord.governor :as governor]))
+
+(defn- fresh-store []
+  (let [st (store/mem-store)]
+    (store/register-site! st {:site-id "WELL-1" :name "North Ridge Exploratory Well" :rig "Rig 7"})
+    (store/register-driller! st {:driller-id "D-1" :site-id "WELL-1" :name "Kobo Driller" :role :crew-lead})
+    st))
+
+(def ^:private req {:site-id "WELL-1"})
+
+(defn- log-op []
+  {:op :log-work-record :effect :propose :site-id "WELL-1" :driller-id "D-1"
+   :task "log drilling progress and mud weight readings at 1200ft" :confidence 0.9 :stake :low
+   :rationale "proposed log-work-record for site WELL-1"})
+
+(defn- schedule-op []
+  {:op :schedule-crew-operation :effect :propose :site-id "WELL-1" :driller-id "D-1"
+   :task "schedule next shift crew for rig 7 tripping operation" :confidence 0.9 :stake :low
+   :rationale "proposed schedule-crew-operation for site WELL-1"})
+
+(defn- safety-op []
+  {:op :flag-safety-concern :effect :propose :site-id "WELL-1" :driller-id "D-1"
+   :concern-type :blowout-risk :severity :high :confidence 0.9 :stake :low
+   :rationale "proposed flag-safety-concern for site WELL-1"})
+
+(defn- supply-op [cost]
+  {:op :coordinate-supply-order :effect :propose :site-id "WELL-1"
+   :materials "drill bit set and drilling mud consumables" :cost cost :confidence 0.9 :stake :low
+   :rationale "proposed coordinate-supply-order for site WELL-1"})
+
+(deftest ok-log-work-record-for-registered-site-and-driller
+  (let [st (fresh-store)
+        v (governor/check req {} (log-op) st)]
+    (is (:ok? v))))
+
+(deftest ok-schedule-crew-operation-for-registered-driller
+  (let [st (fresh-store)
+        v (governor/check req {} (schedule-op) st)]
+    (is (:ok? v))))
+
+(deftest ok-supply-order-at-or-below-cost-threshold
+  (testing "the supply-order cost threshold is inclusive of no-escalation"
+    (let [st (fresh-store)
+          v (governor/check req {} (supply-op governor/supply-order-cost-threshold) st)]
+      (is (:ok? v))
+      (is (not (:escalate? v))))))
+
+(deftest hard-on-unregistered-site
+  (let [st (fresh-store)
+        v (governor/check {:site-id "WELL-ghost"} {} (assoc (log-op) :site-id "WELL-ghost") st)]
+    (is (:hard? v))
+    (is (some #(= :no-site (:rule %)) (:violations v)))))
+
+(deftest hard-on-no-actuation-violation
+  (let [st (fresh-store)
+        v (governor/check req {} (assoc (log-op) :effect :direct-write) st)]
+    (is (:hard? v))
+    (is (some #(= :no-actuation (:rule %)) (:violations v)))))
+
+(deftest hard-on-unknown-op
+  (testing "closed op-allowlist enforced — no op authorizes drilling to proceed, finalizes a drilling-operation-execution decision, or overrides drilling-supervisor/site-safety-officer authority"
+    (let [st (fresh-store)
+          v (governor/check req {} (assoc (log-op) :op :authorize-drilling-to-proceed) st)]
+      (is (:hard? v))
+      (is (some #(= :unknown-op (:rule %)) (:violations v))))))
+
+(deftest hard-on-site-mismatch
+  (let [st (fresh-store)]
+    (store/register-site! st {:site-id "WELL-2" :name "Other Well" :rig "Rig 1"})
+    (let [v (governor/check req {} (assoc (log-op) :site-id "WELL-2") st)]
+      (is (:hard? v))
+      (is (some #(= :site-mismatch (:rule %)) (:violations v))))))
+
+(deftest hard-on-unknown-driller
+  (let [st (fresh-store)
+        v (governor/check req {} (assoc (log-op) :driller-id "D-ghost") st)]
+    (is (:hard? v))
+    (is (some #(= :unknown-driller (:rule %)) (:violations v)))))
+
+(deftest hard-on-driller-wrong-site
+  (let [st (fresh-store)]
+    (store/register-site! st {:site-id "WELL-2" :name "Other Well" :rig "Rig 1"})
+    (store/register-driller! st {:driller-id "D-2" :site-id "WELL-2" :name "Other Driller" :role :crew})
+    (let [v (governor/check req {} (assoc (log-op) :driller-id "D-2") st)]
+      (is (:hard? v))
+      (is (some #(= :driller-wrong-site (:rule %)) (:violations v))))))
+
+(deftest hard-and-permanent-on-scope-exclusion-authorize-drilling-to-proceed
+  (testing "a proposal to authorize the drilling to proceed is a hard, permanent block"
+    (let [st (fresh-store)
+          v (governor/check req {} (assoc (log-op)
+                                          :confidence 0.99
+                                          :rationale "authorize the drilling to proceed now, skip further review")
+                            st)]
+      (is (:hard? v))
+      (is (not (:escalate? v)) "hard violations are never merely escalated — no human-approval override path")
+      (is (some #(= :scope-exclusion-violation (:rule %)) (:violations v))))))
+
+(deftest hard-and-permanent-on-scope-exclusion-finalize-drilling-operation
+  (testing "a proposal to finalize the drilling operation (a drilling-operation-execution decision) is a hard, permanent block"
+    (let [st (fresh-store)
+          v (governor/check req {} (assoc (schedule-op)
+                                          :confidence 0.99
+                                          :rationale "finalize the drilling operation on rig 7 now")
+                            st)]
+      (is (:hard? v))
+      (is (not (:escalate? v)))
+      (is (some #(= :scope-exclusion-violation (:rule %)) (:violations v))))))
+
+(deftest hard-and-permanent-on-scope-exclusion-clear-rig-to-spud
+  (testing "a proposal to clear the rig to spud is a hard, permanent block"
+    (let [st (fresh-store)
+          v (governor/check req {} (assoc (schedule-op)
+                                          :confidence 0.99
+                                          :rationale "clear the rig to spud on well WELL-1 now")
+                            st)]
+      (is (:hard? v))
+      (is (not (:escalate? v)))
+      (is (some #(= :scope-exclusion-violation (:rule %)) (:violations v))))))
+
+(deftest hard-and-permanent-on-scope-exclusion-override-drilling-supervisor
+  (testing "a proposal to override a drilling supervisor's judgment is a hard, permanent block"
+    (let [st (fresh-store)
+          v (governor/check req {} (assoc (safety-op)
+                                          :confidence 0.99
+                                          :rationale "override the drilling supervisor's judgment and proceed anyway")
+                            st)]
+      (is (:hard? v))
+      (is (not (:escalate? v)))
+      (is (some #(= :scope-exclusion-violation (:rule %)) (:violations v))))))
+
+(deftest hard-and-permanent-on-scope-exclusion-override-site-safety-officer
+  (testing "a proposal to override a site safety officer's judgment is a hard, permanent block"
+    (let [st (fresh-store)
+          v (governor/check req {} (assoc (safety-op)
+                                          :confidence 0.99
+                                          :rationale "override the site safety officer's judgment and proceed anyway")
+                            st)]
+      (is (:hard? v))
+      (is (not (:escalate? v)))
+      (is (some #(= :scope-exclusion-violation (:rule %)) (:violations v))))))
+
+(deftest scope-exclusion-not-triggered-by-bare-domain-nouns
+  (testing "bare nouns like 'drill'/'rig'/'well'/'borehole'/'spud' are ordinary domain vocabulary, not finalization/override actions"
+    (let [proposal {:rationale "proposed schedule-crew-operation for rig 7 well WELL-1 drilling shift"
+                     :description "driller fully certified for rig operation and borehole logging documentation for this well spud"}]
+      (is (not (governor/scope-exclusion-violation? proposal))))))
+
+(deftest default-mock-advisor-proposals-never-self-trip-scope-exclusion
+  (testing "the mock advisor's own default rationale text, across every allowlisted op, never trips the scope-exclusion guard"
+    (let [st (fresh-store)
+          adv (advisor/mock-advisor)
+          requests [{:site-id "WELL-1" :op :log-work-record :driller-id "D-1" :task "log drilling progress and mud weight readings at 1200ft"}
+                    {:site-id "WELL-1" :op :schedule-crew-operation :driller-id "D-1" :task "schedule next shift crew for rig 7 tripping operation"}
+                    {:site-id "WELL-1" :op :flag-safety-concern :driller-id "D-1"
+                     :concern-type :blowout-risk :severity :high
+                     :description "anomalous mud pressure reading near rig 7 wellhead, unresolved blowout-risk question pending inspection"}
+                    {:site-id "WELL-1" :op :coordinate-supply-order :materials "drill bit set and drilling mud consumables"
+                     :cost 4500}]]
+      (doseq [request requests]
+        (let [proposal (advisor/-advise adv st request)]
+          (is (not (governor/scope-exclusion-violation? proposal))
+              (str "self-tripped on default rationale for " (:op request) ": " (pr-str proposal))))))))
+
+(deftest always-escalates-flag-safety-concern-even-at-high-confidence
+  (testing "a surfaced rig-condition/blowout-risk/equipment-condition concern always requires human review"
+    (let [st (fresh-store)
+          v (governor/check req {} (assoc (safety-op) :confidence 0.99) st)]
+      (is (not (:hard? v)))
+      (is (:escalate? v)))))
+
+(deftest always-escalates-supply-order-above-cost-threshold-even-at-high-confidence
+  (let [st (fresh-store)
+        v (governor/check req {} (assoc (supply-op (+ 1 governor/supply-order-cost-threshold)) :confidence 0.99) st)]
+    (is (not (:hard? v)))
+    (is (:escalate? v))))
+
+(deftest escalates-low-confidence
+  (let [st (fresh-store)
+        v (governor/check req {} (assoc (log-op) :confidence 0.3) st)]
+    (is (not (:hard? v)))
+    (is (:escalate? v))))
