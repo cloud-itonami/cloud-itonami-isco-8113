@@ -1,0 +1,33 @@
+;; What this vertical's robot physically does, declared for
+;; kotoba.robotics.process (kotoba-lang/robotics). `kbb -M:physics` runs it.
+;;
+;; README "Robotics premise": a drilling-site scheduling/logistics
+;; coordination robot logs drilling records, proposes crew/shift schedules,
+;; surfaces safety concerns and coordinates drilling-equipment/consumables
+;; orders; it never operates the rig. Its physical work is site logistics:
+;; staging drill rods on the pipe rack, and the test pumping of the finished
+;; well that the site schedule waits for.
+;;
+;; Every number without a cited source is marked `estimate` in its :basis.
+;; Replacing an estimate with a sourced value is this bot's growth work.
+{:physics/schema "itonami.physical-ai.spec.v1"
+ :repo "cloud-itonami/cloud-itonami-isco-8113"
+ :cases
+ [{:id :rod-onto-pipe-rack
+   :kind :manipulator
+   :procedure "handling arm lifts a drill rod section from the truck bed onto the pipe rack"
+   :params {:l1-m 1.00 :l2-m 0.80 :m1-kg 20.0 :m2-kg 12.0
+            :from [1.10 0.10] :to [0.50 0.90] :duration-s 3.0 :steps 600}
+   :sweep {:param :payload-kg :values [10.0 20.0 30.0 45.0 60.0]}
+   :quantity :peak-tau1-nm
+   :limit {:max 900.0 :basis "estimate: continuous shoulder torque of a ~50 kg-payload handling arm"}
+   :boundary {:lo 1.0 :hi 150.0}}
+  {:id :well-test-pumping
+   :kind :pipe-flow
+   :procedure "submersible test pump lifts water 60 m through an 80 m, 40 mm rising main during the well's pumping test"
+   :params {:diameter-m 0.04 :length-m 80.0 :roughness-m 1.5e-6 :density-kg-m3 1000.0
+            :viscosity-pa-s 1.0e-3 :pump-efficiency 0.55 :elevation-m 60.0}
+   :sweep {:param :q-m3s :values [0.0005 0.001 0.002 0.003 0.005]}
+   :quantity :head-m
+   :limit {:max 90.0 :basis "estimate: maximum head of the rig's 4-inch test pump near its duty point"}
+   :boundary {:lo 0.0002 :hi 0.008}}]}
