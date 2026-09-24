@@ -1,5 +1,5 @@
 (ns drillcoord.actor-test
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [drillcoord.actor :as actor]
             [drillcoord.store :as store]))
 

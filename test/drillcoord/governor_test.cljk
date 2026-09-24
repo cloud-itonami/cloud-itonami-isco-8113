@@ -1,5 +1,5 @@
 (ns drillcoord.governor-test
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [drillcoord.store :as store]
             [drillcoord.advisor :as advisor]
             [drillcoord.governor :as governor]))
