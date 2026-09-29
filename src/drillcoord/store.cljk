@@ -1,7 +1,7 @@
 (ns drillcoord.store
   "SSoT for the ISCO-08 8113 well drillers and borers and related
   workers drilling-site scheduling/logistics coordination actor
-  (itonami actor pattern, ADR-2607121000 / CLAUDE.md Actors section;
+  (itonami actor pattern, ADR-2607121000 / AGENTS.md Actors section;
   README's 'Robotics premise' — a drilling-site scheduling/logistics
   coordination robot proposes crew/shift scheduling, work-record/
   drilling-log logging, safety-concern flags and drilling-equipment/
